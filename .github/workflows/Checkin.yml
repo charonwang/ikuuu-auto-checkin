@@ -25,6 +25,9 @@ jobs:
         with:
           node-version: latest
 
+      - name: Test response handling
+        run: node --test
+
       - name: Checkin
         id: checkin
         shell: bash
