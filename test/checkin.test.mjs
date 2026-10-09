@@ -1,14 +1,23 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import { checkIn, CheckInError, createCheckInUrl, main } from "../main.js";
+
+// The workflow injects real Secrets into this process. Remove them without
+// reading or retaining their values; never let a mock test fall back to them.
+const secretNames = ["ACCOUNTS", "HOST", "TELEGRAM_TOKEN", "TELEGRAM_TO"];
+for (const name of secretNames) delete process.env[name];
 
 // Every request below is injected. Fail closed if a test accidentally uses fetch.
 mock.method(globalThis, "fetch", () => { throw new Error("Real network is forbidden in mock tests"); });
+const { checkIn, CheckInError, createCheckInUrl, main } = await import("../main.js");
 
 const url = "https://example.test/user/checkin";
 const account = { name: "PRIVATE_ACCOUNT", cookie: "PRIVATE_COOKIE" };
 const response = (body, options = {}) => new Response(body, options);
 const runResponse = (body, options) => checkIn(account, { url, request: async () => response(body, options) });
+
+test("workflow Secrets are unavailable to mock tests", () => {
+  for (const name of secretNames) assert.equal(process.env[name], undefined);
+});
 
 async function expectCode(promise, code) {
   await assert.rejects(promise, (error) => {
@@ -145,5 +154,38 @@ test("invalid ACCOUNTS produce safe output and never send requests", async () =>
     assert.equal(calls, 0);
     assert.match(logs[0], /CONFIG-INVALID/);
     assert.doesNotMatch(logs.join("\n"), /PRIVATE_/);
+  }
+});
+
+test("undefined configuration falls back only to an isolated fake environment", async () => {
+  process.env.ACCOUNTS = JSON.stringify([account]);
+  process.env.HOST = "example.test";
+  const logs = [];
+  let calls = 0;
+  const options = {
+    request: async (requestUrl, requestOptions) => {
+      calls++;
+      assert.equal(requestUrl, url);
+      assert.equal(requestOptions.headers.Cookie, account.cookie);
+      assert.equal(requestOptions.redirect, "manual");
+      return response('{"ret":1,"msg":"PRIVATE_ENV_MESSAGE"}');
+    },
+    logger: { log: (message) => logs.push(message), error: (message) => logs.push(message) },
+    output: (_name, message) => logs.push(message),
+  };
+  try {
+    // Reproduce the CI default-parameter branch using fake values exclusively.
+    assert.equal(await main({ ...options, accountsConfig: undefined }), 0);
+    assert.equal(calls, 1);
+    assert.doesNotMatch(logs.join("\n"), /PRIVATE_|example\.test/);
+
+    // An explicit invalid configuration must not fall back to the environment.
+    logs.length = 0;
+    assert.equal(await main({ ...options, accountsConfig: "PRIVATE_INVALID_JSON" }), 1);
+    assert.equal(calls, 1);
+    assert.match(logs[0], /CONFIG-INVALID/);
+    assert.doesNotMatch(logs.join("\n"), /PRIVATE_/);
+  } finally {
+    for (const name of secretNames) delete process.env[name];
   }
 });
